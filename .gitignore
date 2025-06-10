@@ -2,3 +2,6 @@
 chat-01.py
 test.py
 .env
+
+## 폴더
+__pycache__/
