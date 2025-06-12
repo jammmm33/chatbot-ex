@@ -9,6 +9,8 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 
 
 ## 환경변수 읽어오기 ======================================================
@@ -21,13 +23,13 @@ def get_llm(model='gpt-4o'):
 
 ## database 함수 정의 =====================================================
 def get_database():
-    PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
 
-    ## 임베딩 -> 벡터 스토어(데이터베이스)에 저장
     ## 임베딩 모델 지정
+    PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
     index_name= 'quiz04-law1-2'
     embedding=OpenAIEmbeddings(model="text-embedding-3-large")
 
+    ## 저장된 인덱스 가져오기
     database = PineconeVectorStore.from_existing_index(
         index_name= index_name,
         embedding=embedding,
@@ -46,11 +48,35 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
 ## retrievalQA 함수 정의 ==================================================
 def get_retrievalQA():
     LANGCHAIN_API_KEY = os.getenv('LANGCHAIN_API_KEY')
+    ## LLM 모델 지정
+    llm= get_llm()
 
     ## vector store에서 index 정보
     database = get_database()
+    retriever = database.as_retriever()
+    # (search_kwargs={"k": 2})
 
-    ### Contextualize question ###
+    contextualize_q_system_prompt = (
+    '''채팅 히스토리와 가장 최근 사용자의 질문이 주어졌을 때,  
+    그 질문이 이전 대화의 문맥을 참고할 수 있다는 점을 고려하여,  
+    이전 히스토리 없이도 이해 가능한 독립적인 질문으로 바꿔주세요.  
+    질문에 답변하지는 마세요.  
+    필요하다면 문장을 재작성하고, 그렇지 않으면 그대로 반환하세요.'''
+    )
+
+    contextualize_q_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", contextualize_q_system_prompt),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ]
+    )
+
+    history_aware_retriever = create_history_aware_retriever(
+    llm, retriever, contextualize_q_prompt
+    )
+
+    ### Answer question ###
     system_prompt = (
     '''
     -당신은 전세사기피해 법률 전문가 입니다. 
@@ -74,33 +100,17 @@ def get_retrievalQA():
     ]
     )
 
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
 
-    ## LLM 모델 지정
-    llm= get_llm()
-
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
-
-
-    input_str = RunnableLambda(lambda x: x['input'])
-
-    qa_chain = (
-        {
-            "context": input_str | database.as_retriever() | format_docs,
-            "input": input_str,
-            "chat_history": RunnableLambda(lambda x: x['chat_history'])
-        }
-        | qa_prompt
-        | llm
-        | StrOutputParser()
-    )
+    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
     conversational_rag_chain = RunnableWithMessageHistory(
-        qa_chain,
+        rag_chain,
         get_session_history,
         input_messages_key="input",
         history_messages_key="chat_history",
-        )
+        output_messages_key="answer",
+        ).pick('answer')
 
     return conversational_rag_chain
 
@@ -108,7 +118,8 @@ def get_retrievalQA():
 ## [AI Message 함수 정의] =================================================
 def get_ai_message(user_message, session_id = 'default'):
     qa_chain = get_retrievalQA()
-    ai_message = qa_chain.invoke(
+
+    ai_message = qa_chain.stream(
         {'input': user_message},
         config={"configurable": {"session_id": session_id}}
     )
