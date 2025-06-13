@@ -85,9 +85,31 @@ def get_qa_prompt():
     '''
     )
 
+    ## few-shot #####################################################################################
+    from langchain_core.prompts import PromptTemplate
+    from langchain_core.prompts import FewShotPromptTemplate
+    from config import answer_examples
+
+    example_prompt = PromptTemplate.from_template("Question: {input}\n\nAnswer: {answer}")
+
+
+    few_shot_prompt = FewShotPromptTemplate(
+        examples=answer_examples,         ## 질문/답변 예시들 (전체 type은 list, 각 질문/답변 type은 dict)
+        example_prompt=example_prompt,    ## 단일 예시 포맷
+        prefix='다음 질문에 답변하세요.',
+        suffix="Question: {input}",
+        input_variables=["input"],
+    )
+
+    formmated_few_shot_prompt = few_shot_prompt.format(input='{input}')
+    
+    #################################################################################################
+
+
     qa_prompt = ChatPromptTemplate.from_messages(
     [
         ("system", system_prompt),
+        ('assistant', formmated_few_shot_prompt),
         MessagesPlaceholder("chat_history"),
         ("human", "{input}"),
     ]
